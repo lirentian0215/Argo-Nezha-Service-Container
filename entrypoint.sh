@@ -10,7 +10,7 @@ printf "nameserver 127.0.0.11\nnameserver 8.8.4.4\nnameserver 223.5.5.5\n" > /et
 cat > ./data/config.yaml << EOF
 debug: false
 site:
-  brand: VPS Probe
+  brand: Nezha Probe
   cookiename: nezha-dashboard
   theme: default
   customcode: "<script>\r\nwindow.onload = function(){\r\nvar avatar=document.querySelector(\".item img\")\r\nvar footer=document.querySelector(\"div.is-size-7\")\r\nfooter.innerHTML=\"Powered by $ADMIN\"\r\nfooter.style.visibility=\"visible\"\r\navatar.src=\"https://raw.githubusercontent.com/Orz-3/mini/master/Color/Global.png\"\r\navatar.style.visibility=\"visible\"\r\n}\r\n</script>"
@@ -23,8 +23,8 @@ oauth2:
 httpport: 80
 grpcport: 5555
 grpchost: $DATA_DOMAIN
-proxygrpcport: 0
-tls: false
+proxygrpcport: 443
+tls: true
 enableipchangenotification: false
 enableplainipinnotification: false
 cover: 0
@@ -56,8 +56,52 @@ ingress:
 $SSH_DISABLE  - hostname: $SSH_DOMAIN
 $SSH_DISABLE    service: ssh://localhost:22
   - hostname: $DATA_DOMAIN
-    service: tcp://localhost:5555
+    service: https://localhost:443
+    originRequest:
+      noTLSVerify: true
   - service: http_status:404
+EOF
+
+# 生成 nginx 配置文件 and 自签署SSL证书
+openssl genrsa -out /dashboard/nezha.key 2048
+openssl req -new -subj "/CN=$DATA_DOMAIN" -key nezha.key -out /dashboard/nezha.csr
+openssl x509 -req -days 36500 -in /dashboard/nezha.csr -signkey /dashboard/nezha.key -out /dashboard/nezha.pem
+
+cat > /etc/nginx/nginx.conf  << EOF
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+        worker_connections 768;
+        # multi_accept on;
+}
+
+http {
+  upstream grpcservers {
+    server localhost:5555;
+    keepalive 1024;
+  }
+
+  server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $DATA_DOMAIN;
+
+    ssl_certificate          /dashboard/nezha.pem;
+    ssl_certificate_key      /dashboard/nezha.key;
+
+    underscores_in_headers on;
+
+    location / {
+      grpc_read_timeout 300s;
+      grpc_send_timeout 300s;
+      grpc_socket_keepalive on;
+      grpc_pass grpc://grpcservers;
+    }
+  }
+}
 EOF
 
 # 生成 supervisor 进程守护配置文件
@@ -66,6 +110,13 @@ cat > /etc/supervisor/conf.d/supervisor.conf << EOF
 nodaemon=true
 logfile=/var/log/supervisord.log
 pidfile=/run/supervisord.pid
+
+[program:nginx]
+command=nginx
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/nginx.err.log
+stdout_logfile=/var/log/nginx.out.log
 
 [program:nezha]
 command=/dashboard/app
