@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
-# 如参数不齐全，容器退出
-[[ -z "$WEB_DOMAIN" || -z "$DATA_DOMAIN" ]] && echo " Variables of WEB_JSON and SERVER_JSON Variables are required. " && exit 1
+# 如参数不齐全，容器退出，另外处理某些环境变量填错后的处理
+[[ -z "$GH_USER" || -z "$GH_CLIENTID" || -z "$GH_CLIENTSECRET" || -z "$ARGO_JSON" || -z "$WEB_DOMAIN" || -z "$DATA_DOMAIN" ]] && echo " There are variables that are not set. " && exit 1
+grep -qv '"' <<< $ARGO_JSON && ARGO_JSON=$(sed 's@{@{"@g;s@[,:]@"\0"@g;s@}@"}@g' <<< $ARGO_JSON)  # 没有了"的处理
+[ -n "$GH_REPO" ] && grep -q '/' <<< $GH_REPO && GH_REPO=$(awk -F '/' '{print $NF}' <<< $GH_REPO)  # 填了项目全路径的处理
 
 printf "nameserver 127.0.0.11\nnameserver 8.8.4.4\nnameserver 223.5.5.5\n" > /etc/resolv.conf
 
@@ -13,13 +15,13 @@ site:
   brand: Nezha Probe
   cookiename: nezha-dashboard
   theme: default
-  customcode: "<script>\r\nwindow.onload = function(){\r\nvar avatar=document.querySelector(\".item img\")\r\nvar footer=document.querySelector(\"div.is-size-7\")\r\nfooter.innerHTML=\"Powered by $ADMIN\"\r\nfooter.style.visibility=\"visible\"\r\navatar.src=\"https://raw.githubusercontent.com/Orz-3/mini/master/Color/Global.png\"\r\navatar.style.visibility=\"visible\"\r\n}\r\n</script>"
+  customcode: "<script>\r\nwindow.onload = function(){\r\nvar avatar=document.querySelector(\".item img\")\r\nvar footer=document.querySelector(\"div.is-size-7\")\r\nfooter.innerHTML=\"Powered by $GH_USER\"\r\nfooter.style.visibility=\"visible\"\r\navatar.src=\"https://raw.githubusercontent.com/Orz-3/mini/master/Color/Global.png\"\r\navatar.style.visibility=\"visible\"\r\n}\r\n</script>"
   viewpassword: ""
 oauth2:
   type: github
-  admin: $ADMIN
-  clientid: $CLIENTID
-  clientsecret: $CLIENTSECRET
+  admin: $GH_USER
+  clientid: $GH_CLIENTID
+  clientsecret: $GH_CLIENTSECRET
 httpport: 80
 grpcport: 5555
 grpchost: $DATA_DOMAIN
@@ -104,6 +106,31 @@ http {
 }
 EOF
 
+# 生成定时备份数据库文件，定时任务，删除 30 天前的备份
+if [[ -n "$GH_USER" && -n "$GH_EMAIL" && -n "$GH_REPO" && -n "$GH_PAT" ]]; then
+  cat > ./backup.sh << EOF
+#!/usr/bin/env bash
+
+cd /tmp
+git clone https://$GH_PAT@github.com/$GH_USER/$GH_REPO.git
+TIME=\$(date "+%Y-%m-%d-%H:%M:%S")
+tar czvf $GH_REPO/dashboard-\$TIME.tar.gz /dashboard
+cd $GH_REPO
+find ./ -name '*.gz' | sort | head -n -30 | xargs rm -f
+git config --global user.email $GH_EMAIL
+git config --global user.name $GH_USER
+git add .
+git commit -m "Dashboard backup by crontab at \$TIME ."
+git push
+cd ..
+rm -rf $GH_REPO
+EOF
+
+  # 生成定时任务，每天 0:00:00 备份一次，并重启 cron 服务
+  echo "0 0 * * * root bash /dashboard/backup.sh" >> /etc/crontab
+  service cron restart
+fi
+
 # 生成 supervisor 进程守护配置文件
 cat > /etc/supervisor/conf.d/supervisor.conf << EOF
 [supervisord]
@@ -112,7 +139,7 @@ logfile=/var/log/supervisord.log
 pidfile=/run/supervisord.pid
 
 [program:nginx]
-command=nginx
+command=nginx -g "daemon off;"
 autostart=true
 autorestart=true
 stderr_logfile=/var/log/nginx.err.log
